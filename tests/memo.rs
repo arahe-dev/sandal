@@ -16,15 +16,48 @@ async fn second_run_is_a_hit() {
     assert_eq!((s.hits, s.misses, s.model_calls), (1, 1, 1));
 }
 
+/// Pure op that appends a child of x before it reads children(x). The other
+/// order from `ReadAndAppend`, and the one where the frame's own bump comes
+/// before the read.
+struct AppendThenRead {
+    runs: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Op for AppendThenRead {
+    type Fx = PureFx;
+    type In = XIn;
+    type Out = usize;
+    const NAME: &'static str = "append_then_read";
+    const VERSION: u32 = 1;
+    async fn run(&self, ctx: &Ctx<PureFx>, i: XIn) -> Result<usize> {
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ctx.put(idea("appended first"), &[i.x])?;
+        Ok(ctx.children(i.x).len())
+    }
+}
+
+/// The own-append rule in both orders. Each operation appends a child of x
+/// itself, so its own append must not make its entry stale. The second run is
+/// a hit in both orders.
 #[tokio::test]
 async fn own_append_does_not_self_invalidate() {
+    // Read, then append.
     let r = rig(FakeModel::scripted(&[]));
     let x = r.engine.add(idea("x"), &[]).unwrap().raw();
     let op = ReadAndAppend::new();
     assert_eq!(r.engine.run(&op, XIn { x }).await.unwrap(), 0);
-    // It appended a child of x itself, and must still be a hit.
     assert_eq!(r.engine.run(&op, XIn { x }).await.unwrap(), 0);
-    assert_eq!(op.runs(), 1);
+    assert_eq!(op.runs(), 1, "read-then-append: second run is a hit");
+
+    // Append, then read: the read sees the op's own child, and that is recorded.
+    let r = rig(FakeModel::scripted(&[]));
+    let x = r.engine.add(idea("x"), &[]).unwrap().raw();
+    let op = AppendThenRead { runs: std::sync::atomic::AtomicUsize::new(0) };
+    assert_eq!(r.engine.run(&op, XIn { x }).await.unwrap(), 1);
+    assert_eq!(r.engine.run(&op, XIn { x }).await.unwrap(), 1);
+    assert_eq!(op.runs.load(std::sync::atomic::Ordering::SeqCst), 1, "append-then-read: second run is a hit");
+    assert!(r.engine.stale().is_empty());
 }
 
 #[tokio::test]
