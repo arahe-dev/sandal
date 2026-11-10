@@ -19,6 +19,10 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("plug-in error: {0}")]
     Plug(String),
+    /// A model reply is waiting on someone else (the handoff provider). Not a
+    /// failure of the work: answer the pending prompts and run again.
+    #[error("pending: {0}")]
+    Pending(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -6,19 +7,29 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use sandal::bench::{self, BenchEnv};
 use sandal::config::{build_model, Config, CONFIG_FILE, DEFAULT_CONFIG};
-use sandal::plug::FakeVerifier;
+use sandal::plug::{handoff, FakeVerifier};
 use sandal::*;
+use serde_json::{json, Value};
+
+/// Exit codes, stable for scripts and agents.
+const EXIT_ERROR: u8 = 1;
+/// Waiting on model replies (the handoff provider): answer them and run again.
+const EXIT_PENDING: u8 = 3;
 
 #[derive(Parser)]
 #[command(
     name = "sandal",
     version,
-    about = "Carry ideas that worked in one place into a new problem, propose trials, and re-read conclusions as evidence arrives"
+    about = "Carry ideas that worked in one place into a new problem, propose trials, and re-read conclusions as evidence arrives",
+    after_help = "Exit codes: 0 done, 1 error, 3 waiting on model replies (provider = \"handoff\"; see AGENTS.md)."
 )]
 struct Cli {
     /// The state directory.
     #[arg(long, global = true, default_value = ".sandal")]
     dir: PathBuf,
+    /// Print one JSON document on stdout instead of text (errors too).
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -80,6 +91,8 @@ enum Command {
     },
     /// Print calls, hits and misses for this run, and what the ledger holds
     Stats,
+    /// List model prompts that are waiting for a reply (provider = "handoff")
+    Pending,
     /// Run the bench: the pipeline against the same model asked once
     Bench {
         cases: PathBuf,
@@ -112,15 +125,62 @@ enum AddWhat {
     },
 }
 
+/// What a command produced: the same facts as JSON and as text.
+struct Out {
+    json: Value,
+    text: String,
+}
+
+macro_rules! line {
+    ($t:expr) => { { let _ = writeln!($t); } };
+    ($t:expr, $($a:tt)*) => { { let _ = writeln!($t, $($a)*); } };
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(Cli::parse()).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
+    let cli = Cli::parse();
+    match run(&cli).await {
+        Ok(out) => {
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&out.json).unwrap_or_default());
+            } else {
+                print!("{}", out.text);
+            }
+            ExitCode::SUCCESS
         }
+        Err(e) => fail(&cli, e),
     }
+}
+
+fn fail(cli: &Cli, e: Error) -> ExitCode {
+    if let Error::Pending(_) = e {
+        let list = handoff::pending(&cli.dir);
+        if cli.json {
+            let doc = json!({
+                "ok": false,
+                "status": "pending",
+                "message": "model replies are needed: write each reply to its response_file, then run the same command again",
+                "pending": list,
+            });
+            println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        } else {
+            eprintln!("waiting on {} model reply(ies). For each prompt below, write ONLY the reply to its response file, then run the same command again:", list.len());
+            for p in &list {
+                eprintln!("  prompt:   {}\n  response: {}", p.prompt_file.display(), p.response_file.display());
+            }
+            if list.is_empty() {
+                eprintln!("  ({e})");
+            }
+        }
+        return ExitCode::from(EXIT_PENDING);
+    }
+    if cli.json {
+        let doc = json!({ "ok": false, "status": "error", "error": e.to_string() });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+    } else {
+        eprintln!("error: {e}");
+    }
+    ExitCode::from(EXIT_ERROR)
 }
 
 /// The directory that holds `.sandal/`, against which relative source paths resolve.
@@ -131,20 +191,34 @@ fn project_root(dir: &Path) -> PathBuf {
     }
 }
 
-fn open(cli: &Cli, need_model: bool) -> Result<(Engine, Config)> {
-    let cfg = Config::load(&cli.dir)?;
-    let plugs = cfg.build_plugs(&project_root(&cli.dir), need_model)?;
-    let engine = Engine::open(&cli.dir, plugs, cfg.budget())?;
-    engine.set_max_tokens(cfg.model.max_tokens);
-    Ok((engine, cfg))
+fn load_config(cli: &Cli) -> Result<Config> {
+    Ok(Config::load(&cli.dir)?.apply_env())
 }
 
-fn footer(engine: &Engine) {
+fn open(cli: &Cli, need_model: bool) -> Result<Engine> {
+    let cfg = load_config(cli)?;
+    let plugs = cfg.build_plugs(&project_root(&cli.dir), &cli.dir, need_model)?;
+    let engine = Engine::open(&cli.dir, plugs, cfg.budget())?;
+    engine.set_max_tokens(cfg.model.max_tokens);
+    Ok(engine)
+}
+
+fn stats_json(engine: &Engine) -> Value {
     let s = engine.stats();
-    eprintln!(
-        "model calls {}, world calls {}, hits {}, misses {}",
-        s.model_calls, s.world_calls, s.hits, s.misses
-    );
+    json!({ "model_calls": s.model_calls, "world_calls": s.world_calls, "hits": s.hits, "misses": s.misses })
+}
+
+/// Attach this run's counters: to the JSON document, and as a line on stderr.
+fn with_stats(engine: &Engine, cli: &Cli, mut out: Out) -> Out {
+    out.json["stats"] = stats_json(engine);
+    if !cli.json {
+        let s = engine.stats();
+        eprintln!(
+            "model calls {}, world calls {}, hits {}, misses {}",
+            s.model_calls, s.world_calls, s.hits, s.misses
+        );
+    }
+    out
 }
 
 fn head_map(engine: &Engine, name: &str) -> Result<Id<Map>> {
@@ -174,217 +248,276 @@ fn summary(thing: &Thing) -> String {
     String::new()
 }
 
-async fn run(cli: Cli) -> Result<()> {
+async fn run(cli: &Cli) -> Result<Out> {
     match &cli.command {
         Command::Init => init(&cli.dir),
         Command::Add { what } => {
-            let (engine, _) = open(&cli, false)?;
-            let id = match what {
-                AddWhat::Source { title, body, domain, outcome } => engine
-                    .add(
-                        SourceItem {
-                            title: title.clone(),
-                            body: body.clone(),
-                            domain: domain.clone(),
-                            outcome: outcome.clone(),
-                            url: None,
-                        },
-                        &[],
-                    )?
-                    .raw(),
-                AddWhat::Idea { title, body } => engine
-                    .add(Idea { title: title.clone(), body: body.clone() }, &[])?
-                    .raw(),
+            let engine = open(cli, false)?;
+            let (id, kind) = match what {
+                AddWhat::Source { title, body, domain, outcome } => (
+                    engine
+                        .add(
+                            SourceItem {
+                                title: title.clone(),
+                                body: body.clone(),
+                                domain: domain.clone(),
+                                outcome: outcome.clone(),
+                                url: None,
+                            },
+                            &[],
+                        )?
+                        .raw(),
+                    "source_item",
+                ),
+                AddWhat::Idea { title, body } => (
+                    engine.add(Idea { title: title.clone(), body: body.clone() }, &[])?.raw(),
+                    "idea",
+                ),
             };
-            println!("{id}");
-            Ok(())
+            Ok(Out { json: json!({ "ok": true, "id": id, "kind": kind }), text: format!("{id}\n") })
         }
         Command::Map { name, problem_file } => {
             let problem = std::fs::read_to_string(problem_file)?;
-            let (engine, _) = open(&cli, true)?;
-            let map_id = engine
-                .run(&MapOp, MapIn { name: name.clone(), problem })
-                .await?;
+            let engine = open(cli, true)?;
+            let map_id = engine.run(&MapOp, MapIn { name: name.clone(), problem }).await?;
             engine.set_head(&format!("map/{name}"), map_id.raw())?;
             let map = engine.get(map_id)?;
-            println!("map/{name} -> {map_id}");
-            println!("{}", map.summary);
+            let mut t = String::new();
+            line!(t, "map/{name} -> {map_id}");
+            line!(t, "{}", map.summary);
             for p in &map.parts {
-                println!("  {}: {}", p.name, p.description);
+                line!(t, "  {}: {}", p.name, p.description);
                 for c in &p.conditions {
-                    println!("    - {c}");
+                    line!(t, "    - {c}");
                 }
             }
-            footer(&engine);
-            Ok(())
+            let json = json!({ "ok": true, "name": name, "map": map_id, "summary": map.summary, "parts": map.parts });
+            Ok(with_stats(&engine, cli, Out { json, text: t }))
         }
         Command::Cycle { name, k, max_trials } => {
-            let (engine, _) = open(&cli, true)?;
+            let engine = open(cli, true)?;
             let map = head_map(&engine, name)?;
             let out = engine
                 .run(&Cycle, CycleIn { map, k: *k, max_trials: *max_trials, exclude_domains: Vec::new() })
                 .await?;
             let study = engine.get(out.study)?;
-            println!("study {}", out.study);
+            let mut t = String::new();
+            line!(t, "study {}", out.study);
             for g in &study.groups {
-                println!("group {:?}: {} proposal(s)", g.label, g.members.len());
+                line!(t, "group {:?}: {} proposal(s)", g.label, g.members.len());
             }
-            println!("to try, in order:");
+            line!(t, "to try, in order:");
+            let mut order = Vec::new();
             for (i, id) in study.order.iter().enumerate() {
                 let p = engine.get(*id)?;
-                println!("  {}. {} [{}] {} (trial: {})", i + 1, id.raw().short(), p.part, clip(&p.rebuilt, 80), p.trial.kind);
+                line!(t, "  {}. {} [{}] {} (trial: {})", i + 1, id.raw().short(), p.part, clip(&p.rebuilt, 80), p.trial.kind);
+                order.push(json!({
+                    "proposal": id, "part": p.part, "rebuilt": p.rebuilt, "root": p.root,
+                    "trial_kind": p.trial.kind, "trial": p.trial.description,
+                    "if_right": p.if_right, "if_wrong": p.if_wrong,
+                }));
             }
             if out.skipped > 0 {
-                println!("{} item(s) skipped after a model or validation failure", out.skipped);
+                line!(t, "{} item(s) skipped after a model or validation failure", out.skipped);
             }
-            footer(&engine);
-            Ok(())
+            let json = json!({
+                "ok": true, "study": out.study, "skipped": out.skipped,
+                "groups": study.groups, "order": order,
+            });
+            Ok(with_stats(&engine, cli, Out { json, text: t }))
         }
         Command::Try { proposal_id, force } => {
-            let (engine, _) = open(&cli, false)?;
+            let engine = open(cli, false)?;
             let proposal = Id::<Proposal>::from_raw(engine.resolve(proposal_id)?);
             let input = TryIn { proposal };
             let result = if *force { engine.force(&Try, input).await? } else { engine.run(&Try, input).await? };
             let r = engine.get(result)?;
-            println!("result {result}");
-            println!("grade: {}", r.grade);
-            println!("observed: {}", clip(&r.observed, 500));
+            let mut t = String::new();
+            line!(t, "result {result}");
+            line!(t, "grade: {}", r.grade);
+            line!(t, "observed: {}", clip(&r.observed, 500));
             for (k, v) in &r.metrics {
-                println!("metric {k} = {v}");
+                line!(t, "metric {k} = {v}");
             }
-            footer(&engine);
-            Ok(())
+            let json = json!({
+                "ok": true, "result": result, "proposal": proposal, "grade": r.grade,
+                "observed": r.observed, "metrics": r.metrics,
+            });
+            Ok(with_stats(&engine, cli, Out { json, text: t }))
         }
         Command::Establish { result_id } => {
-            let (engine, _) = open(&cli, false)?;
+            let engine = open(cli, false)?;
             let result = Id::<TrialResult>::from_raw(engine.resolve(result_id)?);
             let verified = verify::confirm(engine.ledger(), result)?;
             let proposal = *verified.value();
             engine.establish(verified)?;
-            println!("established proposal {proposal}");
-            Ok(())
+            Ok(Out {
+                json: json!({ "ok": true, "proposal": proposal, "evidence": result }),
+                text: format!("established proposal {proposal}\n"),
+            })
         }
         Command::Read { thing_id, map } => {
-            let (engine, _) = open(&cli, true)?;
+            let engine = open(cli, true)?;
             let thing = engine.resolve(thing_id)?;
             let map = head_map(&engine, map)?;
             let id = engine.run(&Read, ReadIn { thing, map }).await?;
             let r = engine.get(id)?;
-            println!("reading {id}");
-            println!("{}", r.text);
+            let mut t = String::new();
+            line!(t, "reading {id}");
+            line!(t, "{}", r.text);
             for u in &r.useful_for {
-                println!("  useful for: {u}");
+                line!(t, "  useful for: {u}");
             }
             for c in &r.caveats {
-                println!("  caveat: {c}");
+                line!(t, "  caveat: {c}");
             }
-            footer(&engine);
-            Ok(())
+            let json = json!({
+                "ok": true, "reading": id, "of": thing, "text": r.text,
+                "useful_for": r.useful_for, "caveats": r.caveats,
+            });
+            Ok(with_stats(&engine, cli, Out { json, text: t }))
         }
         Command::Back { thing_id } => {
-            let (engine, _) = open(&cli, true)?;
+            let engine = open(cli, true)?;
             let thing = engine.resolve(thing_id)?;
             let id = engine.run(&Back, BackIn { thing }).await?;
             let o = engine.get(id)?;
-            println!("origin {id}");
-            println!("principles:");
+            let mut t = String::new();
+            line!(t, "origin {id}");
+            line!(t, "principles:");
             for p in &o.principles {
-                println!("  - {p}");
+                line!(t, "  - {p}");
             }
-            println!("conditions:");
+            line!(t, "conditions:");
             for c in &o.conditions {
-                println!("  - {c}");
+                line!(t, "  - {c}");
             }
-            footer(&engine);
-            Ok(())
+            let json = json!({
+                "ok": true, "origin": id, "of": thing,
+                "principles": o.principles, "conditions": o.conditions,
+            });
+            Ok(with_stats(&engine, cli, Out { json, text: t }))
         }
         Command::Forward { thing_id, depth } => {
-            let (engine, _) = open(&cli, false)?;
+            let engine = open(cli, false)?;
             let thing = engine.resolve(thing_id)?;
             let ds = engine.run(&Forward, ForwardIn { thing, depth: *depth }).await?;
-            print_tree(&engine, thing, &ds)
+            let text = tree(&engine, thing, &ds)?;
+            Ok(Out { json: json!({ "ok": true, "thing": thing, "descendants": ds }), text })
         }
         Command::Stale => {
-            let (engine, _) = open(&cli, false)?;
+            let engine = open(cli, false)?;
             let stale = engine.stale();
+            let mut t = String::new();
             if stale.is_empty() {
-                println!("nothing is stale");
+                line!(t, "nothing is stale");
             }
-            for e in stale {
-                println!("{:<8} {:<6} {}  {}", e.op, e.effect, hex_short(&e.key), clip(&e.input.to_string(), 80));
+            for e in &stale {
+                line!(t, "{:<8} {:<6} {}  {}", e.op, e.effect, hex_short(&e.key), clip(&e.input.to_string(), 80));
             }
-            Ok(())
+            let items: Vec<Value> = stale
+                .iter()
+                .map(|e| json!({ "op": e.op, "effect": e.effect, "key": hex::encode(e.key), "input": e.input }))
+                .collect();
+            Ok(Out { json: json!({ "ok": true, "stale": items }), text: t })
         }
         Command::Show { id } => {
-            let (engine, _) = open(&cli, false)?;
+            let engine = open(cli, false)?;
             show(&engine, engine.resolve(id)?)
         }
         Command::Log { kind } => {
-            let (engine, _) = open(&cli, false)?;
-            for t in engine.ledger().things().iter().rev() {
-                if kind.as_deref().is_some_and(|k| k != t.kind) {
+            let engine = open(cli, false)?;
+            let mut t = String::new();
+            let mut items = Vec::new();
+            for th in engine.ledger().things().iter().rev() {
+                if kind.as_deref().is_some_and(|k| k != th.kind) {
                     continue;
                 }
-                println!("{} {:<13} {:<22} {}", t.id.short(), t.kind, t.made_by.to_string(), summary(t));
+                line!(t, "{} {:<13} {:<22} {}", th.id.short(), th.kind, th.made_by.to_string(), summary(th));
+                items.push(json!({
+                    "id": th.id, "kind": th.kind, "made_by": th.made_by, "summary": summary(th), "at": th.at,
+                }));
             }
-            Ok(())
+            Ok(Out { json: json!({ "ok": true, "things": items }), text: t })
         }
         Command::Stats => {
-            let (engine, _) = open(&cli, false)?;
+            let engine = open(cli, false)?;
             // DECISION: counters are per process, so a bare `sandal stats` starts
             // from zero. It also summarises what the ledger and memo hold.
             let s = engine.stats();
-            println!("this run: model calls {}, world calls {}, hits {}, misses {}", s.model_calls, s.world_calls, s.hits, s.misses);
             let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
-            for t in engine.ledger().things() {
-                *kinds.entry(t.kind).or_default() += 1;
+            for th in engine.ledger().things() {
+                *kinds.entry(th.kind).or_default() += 1;
             }
-            println!("ledger: {} things", engine.ledger().len());
-            for (k, n) in kinds {
-                println!("  {k:<13} {n}");
+            let mut t = String::new();
+            line!(t, "this run: model calls {}, world calls {}, hits {}, misses {}", s.model_calls, s.world_calls, s.hits, s.misses);
+            line!(t, "ledger: {} things", engine.ledger().len());
+            for (k, n) in &kinds {
+                line!(t, "  {k:<13} {n}");
             }
-            println!("heads: {}", engine.ledger().heads().len());
-            println!("memo: {} entries, {} stale", engine.memo_entries().len(), engine.stale().len());
-            Ok(())
+            line!(t, "heads: {}", engine.ledger().heads().len());
+            line!(t, "memo: {} entries, {} stale", engine.memo_entries().len(), engine.stale().len());
+            let json = json!({
+                "ok": true, "this_run": stats_json(&engine), "things": engine.ledger().len(), "kinds": kinds,
+                "heads": engine.ledger().heads().len(),
+                "memo": { "entries": engine.memo_entries().len(), "stale": engine.stale().len() },
+            });
+            Ok(Out { json, text: t })
+        }
+        Command::Pending => {
+            let list = handoff::pending(&cli.dir);
+            let mut t = String::new();
+            if list.is_empty() {
+                line!(t, "nothing is waiting for a reply");
+            }
+            for p in &list {
+                line!(t, "prompt:   {}\nresponse: {}", p.prompt_file.display(), p.response_file.display());
+            }
+            Ok(Out { json: json!({ "ok": true, "pending": list }), text: t })
         }
         Command::Bench { cases, n } => {
-            let env = bench_env(&cli)?;
+            let env = bench_env(cli)?;
             let cases = bench::load_cases(cases)?;
             let report = bench::run(&cases, &env, *n).await?;
-            print!("{}", bench::format_report(&report));
             std::fs::write("bench-report.json", serde_json::to_string_pretty(&report)?)?;
-            println!("wrote bench-report.json");
-            Ok(())
+            let mut text = bench::format_report(&report);
+            text.push_str("wrote bench-report.json\n");
+            Ok(Out { json: json!({ "ok": true, "report": report }), text })
         }
         Command::BenchIncremental { cases } => {
-            let env = bench_env(&cli)?;
+            let env = bench_env(cli)?;
             let cases = bench::load_cases(cases)?;
             let report = bench::run_incremental(&cases, &env).await?;
-            print!("{}", bench::format_incremental(&report));
-            println!("(with a real model, outputs vary between runs: compare the call counts, not the ids)");
-            Ok(())
+            let mut text = bench::format_incremental(&report);
+            text.push_str("(with a real model, outputs vary between runs: compare the call counts, not the ids)\n");
+            Ok(Out { json: json!({ "ok": true, "report": report }), text })
         }
     }
 }
 
-fn init(dir: &Path) -> Result<()> {
+fn init(dir: &Path) -> Result<Out> {
     std::fs::create_dir_all(dir)?;
     for f in [sandal::ledger::LEDGER_FILE, sandal::memo::MEMO_FILE] {
         std::fs::OpenOptions::new().create(true).append(true).open(dir.join(f))?;
     }
     let cfg = dir.join(CONFIG_FILE);
-    if cfg.exists() {
-        println!("kept the existing {}", cfg.display());
-    } else {
+    let mut t = String::new();
+    let written = !cfg.exists();
+    if written {
         std::fs::write(&cfg, DEFAULT_CONFIG)?;
-        println!("wrote {}", cfg.display());
+        line!(t, "wrote {}", cfg.display());
+    } else {
+        line!(t, "kept the existing {}", cfg.display());
     }
-    println!("initialised {}", dir.display());
-    Ok(())
+    line!(t, "initialised {}", dir.display());
+    Ok(Out {
+        json: json!({ "ok": true, "dir": dir, "config": cfg, "config_written": written }),
+        text: t,
+    })
 }
 
 fn bench_env(cli: &Cli) -> Result<BenchEnv> {
-    let cfg = Config::load(&cli.dir)?;
+    let cfg = load_config(cli)?;
     let verifier = cfg.build_verifier()?;
     // DECISION: with no verifier templates in config, `carry` would have no
     // trial kind to choose and every proposal would be refused. The bench runs
@@ -395,8 +528,8 @@ fn bench_env(cli: &Cli) -> Result<BenchEnv> {
         Arc::new(verifier)
     };
     Ok(BenchEnv {
-        model: build_model(&cfg.model)?,
-        judge: build_model(cfg.judge_model_config())?,
+        model: build_model(&cfg.model, &cli.dir)?,
+        judge: build_model(cfg.judge_model_config(), &cli.dir)?,
         verifier,
         budget: cfg.budget(),
         max_tokens: cfg.model.max_tokens,
@@ -407,29 +540,40 @@ fn hex_short(key: &[u8; 32]) -> String {
     key.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
-fn show(engine: &Engine, id: ThingId) -> Result<()> {
-    let t = engine.thing(id)?;
-    println!("id:       {}", t.id);
-    println!("kind:     {}", t.kind);
-    println!("made by:  {}", t.made_by);
-    println!("at:       {}", t.at);
-    println!("parents:");
-    for p in &t.parents {
-        println!("  {} {}", p.short(), engine.thing(*p).map(|x| x.kind).unwrap_or_default());
+fn show(engine: &Engine, id: ThingId) -> Result<Out> {
+    let th = engine.thing(id)?;
+    let kind_of = |x: &ThingId| engine.thing(*x).map(|t| t.kind).unwrap_or_default();
+    let children = engine.ledger().children(&id);
+    let mut t = String::new();
+    line!(t, "id:       {}", th.id);
+    line!(t, "kind:     {}", th.kind);
+    line!(t, "made by:  {}", th.made_by);
+    line!(t, "at:       {}", th.at);
+    line!(t, "parents:");
+    for p in &th.parents {
+        line!(t, "  {} {}", p.short(), kind_of(p));
     }
-    println!("children:");
-    for c in engine.ledger().children(&id) {
-        println!("  {} {}", c.short(), engine.thing(c).map(|x| x.kind).unwrap_or_default());
+    line!(t, "children:");
+    for c in &children {
+        line!(t, "  {} {}", c.short(), kind_of(c));
     }
-    println!("payload:");
-    println!("{}", serde_json::to_string_pretty(&t.payload)?);
-    Ok(())
+    line!(t, "payload:");
+    line!(t, "{}", serde_json::to_string_pretty(&th.payload)?);
+    let describe = |ids: &[ThingId]| -> Vec<Value> {
+        ids.iter().map(|x| json!({ "id": x, "kind": kind_of(x) })).collect()
+    };
+    let json = json!({
+        "ok": true, "thing": th,
+        "parents": describe(&th.parents), "children": describe(&children),
+    });
+    Ok(Out { json, text: t })
 }
 
-fn print_tree(engine: &Engine, root: ThingId, ds: &[Descendant]) -> Result<()> {
+fn tree(engine: &Engine, root: ThingId, ds: &[Descendant]) -> Result<String> {
     let by_id: BTreeMap<ThingId, &Descendant> = ds.iter().map(|d| (d.id, d)).collect();
     let root_thing = engine.thing(root)?;
-    println!("{} {} {}", root.short(), root_thing.kind, summary(&root_thing));
+    let mut t = String::new();
+    line!(t, "{} {} {}", root.short(), root_thing.kind, summary(&root_thing));
     let mut printed: HashSet<ThingId> = HashSet::new();
     fn walk(
         engine: &Engine,
@@ -437,6 +581,7 @@ fn print_tree(engine: &Engine, root: ThingId, ds: &[Descendant]) -> Result<()> {
         depth: u8,
         by_id: &BTreeMap<ThingId, &Descendant>,
         printed: &mut HashSet<ThingId>,
+        t: &mut String,
     ) -> Result<()> {
         for child in engine.ledger().children(&node) {
             let Some(d) = by_id.get(&child) else { continue };
@@ -444,16 +589,16 @@ fn print_tree(engine: &Engine, root: ThingId, ds: &[Descendant]) -> Result<()> {
             if d.depth != depth + 1 || !printed.insert(child) {
                 continue;
             }
-            let t = engine.thing(child)?;
+            let th = engine.thing(child)?;
             let grade = d.grade.map(|g| format!(" [{g}]")).unwrap_or_default();
-            println!("{}{} {}{} {}", "  ".repeat(depth as usize + 1), child.short(), t.kind, grade, summary(&t));
-            walk(engine, child, depth + 1, by_id, printed)?;
+            line!(t, "{}{} {}{} {}", "  ".repeat(depth as usize + 1), child.short(), th.kind, grade, summary(&th));
+            walk(engine, child, depth + 1, by_id, printed, t)?;
         }
         Ok(())
     }
-    walk(engine, root, 0, &by_id, &mut printed)?;
+    walk(engine, root, 0, &by_id, &mut printed, &mut t)?;
     if ds.is_empty() {
-        println!("  (nothing yet)");
+        line!(t, "  (nothing yet)");
     }
-    Ok(())
+    Ok(t)
 }

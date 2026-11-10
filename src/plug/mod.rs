@@ -8,16 +8,22 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::thing::{Grade, SourceItem, TrialSpec};
 
+pub mod command_model;
 pub mod command_verifier;
 pub mod fake;
 pub mod file_source;
+pub mod handoff;
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
+#[cfg(feature = "openai")]
+pub mod openai;
 
+pub use command_model::CommandModel;
 pub use command_verifier::{CommandVerifier, ParamTemplate, Template};
 pub use fake::{FakeModel, FakeSource, FakeVerifier};
 pub use file_source::FileSource;
+pub use handoff::HandoffModel;
 
 #[async_trait]
 pub trait Model: Send + Sync {

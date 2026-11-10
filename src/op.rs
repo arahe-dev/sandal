@@ -79,14 +79,15 @@ where
 /// Used where a composed operation drops failures and carries on: keeps the
 /// successes and counts the failures.
 ///
-/// DECISION: `BudgetExhausted` is never skipped. Dropping it would make a run
-/// that ran out of budget look like one where the model had nothing to say.
+/// DECISION: `BudgetExhausted` and `Pending` are never skipped. Dropping them
+/// would make a run that ran out of budget, or is waiting for answers, look
+/// like one where the model had nothing to say.
 pub fn keep_ok<T>(results: Vec<Result<T>>, skipped: &mut u32) -> Result<Vec<T>> {
     let mut out = Vec::new();
     for r in results {
         match r {
             Ok(v) => out.push(v),
-            Err(e @ Error::BudgetExhausted(_)) => return Err(e),
+            Err(e @ (Error::BudgetExhausted(_) | Error::Pending(_))) => return Err(e),
             Err(_) => *skipped += 1,
         }
     }

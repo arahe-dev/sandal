@@ -19,8 +19,9 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "
 toml = "1.2.1"
 
 [features]
-default = []
+default = ["anthropic", "openai"]
 anthropic = ["dep:reqwest"]
+openai = ["dep:reqwest"]
 
 [[bin]]
 name = "sandal"
@@ -29,5 +30,5 @@ path = "src/bin/sandal.rs"
 [dev-dependencies]
 async-trait = "0.1.92"
 tempfile = "3.27.0"
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 trybuild = "1.0.122"

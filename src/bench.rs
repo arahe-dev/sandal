@@ -146,6 +146,15 @@ fn fresh_engine(env: &BenchEnv, dir: &TempDir, order: &[SourceItem]) -> Result<E
     Ok(engine)
 }
 
+/// Say which case an error came from. Errors that are signals rather than
+/// failures (waiting on a reply, out of budget) keep their kind.
+fn in_case(id: &str, e: Error) -> Error {
+    match e {
+        Error::Pending(_) | Error::BudgetExhausted(_) => e,
+        other => Error::Plug(format!("case {id}: {other}")),
+    }
+}
+
 // ---- report ------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -363,7 +372,7 @@ async fn score(arm: ArmOutput, case: &BenchCase, env: &BenchEnv) -> Result<ArmSc
 pub async fn run(cases: &[BenchCase], env: &BenchEnv, n: usize) -> Result<BenchReport> {
     let mut results = Vec::new();
     for case in cases {
-        let ctx = |e: Error| Error::Plug(format!("case {}: {e}", case.id));
+        let ctx = |e: Error| in_case(&case.id, e);
         let order = shuffled_sources(case);
         let sandal = sandal_arm(case, &order, env, n).await.map_err(ctx)?;
         let plain = plain_arm(case, &order, env, n).await.map_err(ctx)?;
@@ -427,7 +436,7 @@ async fn read_all(engine: &Engine, sources: &[ThingId], map: Id<crate::thing::Ma
 pub async fn run_incremental(cases: &[BenchCase], env: &BenchEnv) -> Result<IncrementalReport> {
     let mut out = Vec::new();
     for case in cases {
-        let ctx = |e: Error| Error::Plug(format!("case {}: {e}", case.id));
+        let ctx = |e: Error| in_case(&case.id, e);
         out.push(incremental_case(case, env).await.map_err(ctx)?);
     }
     Ok(IncrementalReport { cases: out })

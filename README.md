@@ -14,17 +14,32 @@ v0 is built to show two things, either of which could fail:
 ```bash
 cargo test                          # every test runs against fakes: no network, no real model
 cargo clippy --all-targets -- -D warnings
-cargo build --features anthropic    # adds the Anthropic Messages API adapter
+cargo build --no-default-features   # without the HTTP adapters (handoff and command providers only)
 cargo run --example try_and_read    # the reference for writing a new operation
 ```
 
 The compile-fail tests in `tests/ui/` pin the compiler's wording of two errors. If a newer compiler words them differently, refresh them with `TRYBUILD=overwrite cargo test --test compile`.
 
+## Any model, any agent
+
+SANDAL is not tied to a vendor. Set `[model] provider` in `.sandal/config.toml`:
+
+| provider | what it is |
+| --- | --- |
+| `handoff` (default) | **No API at all.** Prompts are written to `.sandal/handoff/`; whoever drives SANDAL, an agent or you, writes the replies and runs the command again. |
+| `openai` | Any OpenAI-compatible endpoint: OpenAI, Ollama, LM Studio, vLLM, OpenRouter, Groq, llama.cpp. Set `base_url`; a key is only needed if the server wants one. |
+| `anthropic` | The Anthropic Messages API. |
+| `command` | Any program: the prompt goes to its stdin, the reply is its stdout. Wrap a local CLI agent or a script. |
+
+Keys come from the environment variable named by `api_key_env`, never from the file, and `SANDAL_PROVIDER`, `SANDAL_MODEL`, `SANDAL_BASE_URL` and `SANDAL_API_KEY_ENV` override `[model]` per run.
+
+Every command takes `--json` for one machine-readable document on stdout, and exit code `3` means "waiting on model replies". [AGENTS.md](AGENTS.md) describes the protocol for agents.
+
 ## Using the CLI
 
 ```bash
 sandal init                                  # creates .sandal/ with a default config
-# edit .sandal/config.toml: set [model] name, and add sources and verifier templates
+# edit .sandal/config.toml: pick a provider, add sources and verifier templates
 
 sandal add source --title "..." --body "..." --domain "..." --outcome "..."
 sandal map kitchen --problem-file problem.txt
@@ -33,10 +48,11 @@ sandal try <proposal-id>                     # runs the proposal's trial through
 sandal read <thing-id> --map kitchen         # what is this useful for, given the evidence so far
 sandal stale                                 # readings whose evidence has moved
 sandal forward <thing-id>                    # what a thing led to, as a tree
+sandal pending                               # model prompts waiting for a reply (handoff)
 sandal establish <result-id>                 # only a verifier's Confirmed result can do this
 ```
 
-Ids may be given as any unique prefix of at least 8 hex characters. The model key is read from `ANTHROPIC_API_KEY`; the model name comes from config and is never hard-coded.
+Ids may be given as any unique prefix of at least 8 hex characters.
 
 ### Judging it
 
@@ -60,7 +76,7 @@ sandal bench-incremental bench/fixtures.jsonl
 | `Verified<T>` (only `verify::confirm` makes one) | `src/verify.rs` |
 | The ten operations and `Cycle` | `src/ops/` |
 | Prompts, one per model operation | `src/prompts/` |
-| Model, Source and Verifier plug-ins, with fakes | `src/plug/` |
+| Model, Source and Verifier plug-ins, with fakes | `src/plug/` (models: `handoff`, `command_model`, `openai`, `anthropic`) |
 | Config, bench, CLI | `src/config.rs`, `src/bench.rs`, `src/bin/sandal.rs` |
 
 State lives in `.sandal/`: `ledger.jsonl` and `memo.jsonl` (both append-only) and `config.toml`.
@@ -73,10 +89,11 @@ Places where the design was silent or needed a small hook are marked `// DECISIO
 
 - `Op::normalize`, a defaulted hook, lets `Roots` sort its input before the memo key is computed (`src/op.rs`).
 - Concurrency is bounded around model, source and verifier calls rather than around whole operations, so nested `run_all` calls cannot deadlock (`src/ctx.rs`).
-- `Cycle` skips failed items but never `BudgetExhausted` (`keep_ok` in `src/op.rs`).
+- `Cycle` skips failed items but never `BudgetExhausted` or `Pending` (`keep_ok` in `src/op.rs`).
 - A torn last line in `ledger.jsonl` or `memo.jsonl` is cut off the file when it is opened, so the next append cannot turn it into a bad middle line (`src/ledger.rs`).
 - `Mix` reads "the remaining members in the same group order" as: the head of every group first, then the rest of each group in turn (`src/ops/mix.rs`).
 - `sandal stats` counters are per process; it also summarises the ledger. With no verifier templates, `sandal bench` uses a placeholder trial kind, since it runs no trials (`src/bin/sandal.rs`).
 - `[judge]` in config sets the bench judge, falling back to `[model]` (`src/config.rs`).
+- The error enum gained `Pending`, for a model reply that is waiting on the caller (`src/error.rs`).
 
 Still out of scope for v0, with reasons in the design: collision finder across maps, prompt tuning, a ledger-reading source, in-flight deduplication, a written syntax, multiple verifiers, multi-process access, macros, a user interface.

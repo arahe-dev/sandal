@@ -1,7 +1,7 @@
 //! Adapter for the Anthropic Messages API (feature `anthropic`).
 //!
-//! The key comes from `ANTHROPIC_API_KEY` and the model name from config.
-//! No model name is hard-coded here.
+//! The model name, the base URL and the name of the environment variable that
+//! holds the key all come from config. No model name is hard-coded here.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -9,24 +9,26 @@ use serde_json::{json, Value};
 use super::Model;
 use crate::error::{Error, Result};
 
-const URL: &str = "https://api.anthropic.com/v1/messages";
+pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 
 pub struct AnthropicModel {
     client: reqwest::Client,
-    key: String,
+    url: String,
+    key: Option<String>,
     name: String,
 }
 
 impl AnthropicModel {
-    pub fn from_env(name: &str) -> Result<Self> {
-        let key = std::env::var("ANTHROPIC_API_KEY")
-            .map_err(|_| Error::Plug("ANTHROPIC_API_KEY is not set".into()))?;
-        Ok(AnthropicModel {
+    /// `key` is sent as `x-api-key` when present. `base_url` is the host,
+    /// without `/v1/messages`.
+    pub fn new(name: &str, base_url: &str, key: Option<String>) -> Self {
+        AnthropicModel {
             client: reqwest::Client::new(),
+            url: format!("{}/v1/messages", base_url.trim_end_matches('/')),
             key,
             name: name.to_string(),
-        })
+        }
     }
 }
 
@@ -43,12 +45,15 @@ impl Model for AnthropicModel {
             "system": system,
             "messages": [{ "role": "user", "content": prompt }],
         });
-        let resp = self
+        let mut req = self
             .client
-            .post(URL)
-            .header("x-api-key", &self.key)
+            .post(&self.url)
             .header("anthropic-version", API_VERSION)
-            .json(&body)
+            .json(&body);
+        if let Some(key) = &self.key {
+            req = req.header("x-api-key", key);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| Error::Plug(format!("anthropic request failed: {e}")))?;
