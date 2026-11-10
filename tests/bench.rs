@@ -1,3 +1,6 @@
+mod common;
+
+use common::WorldCount;
 use sandal::bench::{self, BenchCase, BenchEnv};
 use sandal::plug::{FakeModel, FakeVerifier};
 use sandal::*;
@@ -171,4 +174,50 @@ async fn incremental_reports_a_case_with_no_proposals() {
     let judge = Arc::new(FakeModel::scripted(&[]));
     let report = bench::run_incremental(&cases[..1], &env(model, judge)).await.unwrap();
     assert!(report.cases[0].no_proposals);
+}
+
+/// A World operation that calls another World operation and returns its answer.
+/// It exists so the test can reach a stale World result from a parent.
+struct WorldOuter;
+
+#[async_trait::async_trait]
+impl Op for WorldOuter {
+    type Fx = WorldFx;
+    type In = common::XIn;
+    type Out = usize;
+    const NAME: &'static str = "world_outer";
+    const VERSION: u32 = 1;
+    async fn run(&self, ctx: &Ctx<WorldFx>, i: common::XIn) -> Result<usize> {
+        ctx.run(&WorldCount { runs: std::sync::atomic::AtomicUsize::new(0) }, i).await
+    }
+}
+
+/// Covers the stale World path, which the bench never reaches: `Read` is a
+/// Model operation and cannot call a World one, and the refresh route runs no
+/// World operation after the cycle. A World result that is stale when a parent
+/// reads it must still pass its dependencies up, or the parent goes stale too
+/// late. Without that, `stale()` would not list the parent.
+#[tokio::test]
+async fn incremental_covers_stale_world_dependency() {
+    let r = common::rig(FakeModel::scripted(&[]));
+    let x = r.engine.add(common::idea("x"), &[]).unwrap().raw();
+
+    // A World result is stored with its dependency on the children of x.
+    let counter = WorldCount { runs: std::sync::atomic::AtomicUsize::new(0) };
+    assert_eq!(r.engine.run(&counter, common::XIn { x }).await.unwrap(), 0);
+
+    // New evidence under x makes that stored result stale.
+    r.engine
+        .run(&common::Append, common::AppendIn { x, tag: "new evidence".into() })
+        .await
+        .unwrap();
+    assert!(r.engine.stale().iter().any(|e| e.op == "world_count"));
+
+    // A parent World op runs for the first time. It reads the stale result,
+    // which is returned as stored; the parent must inherit the dependency.
+    assert_eq!(r.engine.run(&WorldOuter, common::XIn { x }).await.unwrap(), 0);
+    assert!(
+        r.engine.stale().iter().any(|e| e.op == "world_outer"),
+        "the parent of a stale World result must be stale too"
+    );
 }
