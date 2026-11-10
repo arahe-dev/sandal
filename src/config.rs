@@ -1,4 +1,9 @@
-//! `.sandal/config.toml`: model, budget, sources, verifier templates.
+//! `.sandal/config.toml`: how model steps are answered, budget, sources,
+//! verifier templates.
+//!
+//! SANDAL is a tool for harnesses (Claude Code, Codex, Cursor, a script, you),
+//! not a harness. It holds no API keys and calls no model API: the harness that
+//! drives it is the model, or it names a program SANDAL may run to ask one.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,36 +13,34 @@ use serde::Deserialize;
 use crate::engine::{Budget, Plugs};
 use crate::error::{Error, Result};
 use crate::plug::command_verifier::{CommandVerifier, ParamTemplate, Template};
-use crate::plug::{FakeModel, FileSource, Model, Source};
+use crate::plug::{CommandModel, FakeModel, FileSource, HandoffModel, Model, Source};
 
 pub const CONFIG_FILE: &str = "config.toml";
 
 /// Written by `sandal init`.
 pub const DEFAULT_CONFIG: &str = r#"[model]
-# Which model SANDAL talks to. Pick one provider:
-#   "handoff"    no API: prompts are written to .sandal/handoff/ and whoever is
-#                driving SANDAL (an agent, or you) writes the replies. Needs nothing.
-#   "openai"     any OpenAI-compatible endpoint: OpenAI, Ollama, LM Studio, vLLM,
-#                OpenRouter, Groq, llama.cpp ... (set base_url; key is optional locally)
-#   "anthropic"  the Anthropic Messages API
-#   "command"    any program: the prompt goes to its stdin, the reply is its stdout
-#   "fake"       always fails; for wiring checks
+# Who answers the model steps (map, back, match, carry, roots, read).
+#
+#   "handoff"   The harness driving SANDAL answers. SANDAL writes each prompt to
+#               .sandal/handoff/, stops with exit code 3, and the harness replies
+#               with `sandal answer <key>` and runs the command again. No model
+#               API, no key, nothing to configure. This is the normal mode.
+#   "command"   Let SANDAL ask a program on this machine, so a run needs no
+#               hand-off: the prompt goes to its stdin and the reply is its
+#               stdout. Point it at any harness CLI that has a one-shot mode.
+#   "fake"      Always fails. For wiring checks.
 provider = "handoff"
-name = ""                     # the model name (openai, anthropic); a label for command
-max_tokens = 2000
+name = ""                     # a label for the command provider; part of the memo key
+max_tokens = 2000             # passed to a command as SANDAL_MAX_TOKENS
 
-# base_url = "http://localhost:11434/v1"   # openai: default https://api.openai.com/v1
-# api_key_env = "OPENAI_API_KEY"           # name of the env var holding the key
-# max_tokens_param = "max_tokens"          # openai: "max_completion_tokens" for OpenAI reasoning models
-# command = "claude"                       # command provider: program and fixed arguments
-# args = ["-p"]
+# command = "my-harness"      # command provider: the program, and its fixed arguments
+# args = ["--one-shot"]
 # timeout_secs = 300
 
 # The model that judges `sandal bench`. It should be at least as strong as the
 # model under test. When this section is absent, [model] is used.
 # [judge]
-# provider = "openai"
-# name = ""
+# provider = "handoff"
 
 [budget]
 max_model_calls = 200
@@ -66,12 +69,6 @@ pub struct ModelConfig {
     pub provider: String,
     pub name: String,
     pub max_tokens: u32,
-    /// openai and anthropic: where to send requests.
-    pub base_url: Option<String>,
-    /// Name of the environment variable that holds the API key.
-    pub api_key_env: Option<String>,
-    /// openai: the request field that carries the token limit.
-    pub max_tokens_param: Option<String>,
     /// command: the program and its fixed arguments.
     pub command: Option<String>,
     pub args: Vec<String>,
@@ -84,9 +81,6 @@ impl Default for ModelConfig {
             provider: "handoff".into(),
             name: String::new(),
             max_tokens: 2000,
-            base_url: None,
-            api_key_env: None,
-            max_tokens_param: None,
             command: None,
             args: Vec::new(),
             timeout_secs: 300,
@@ -167,22 +161,16 @@ impl Config {
         toml::from_str(text).map_err(|e| Error::Plug(format!("config: {e}")))
     }
 
-    /// Let environment variables override `[model]`, so an agent can pick a
-    /// model without editing the file: `SANDAL_PROVIDER`, `SANDAL_MODEL`,
-    /// `SANDAL_BASE_URL`, `SANDAL_API_KEY_ENV`.
+    /// Let environment variables override `[model]`, so a harness can choose
+    /// how model steps are answered without editing the file:
+    /// `SANDAL_PROVIDER`, `SANDAL_COMMAND`.
     pub fn apply_env(mut self) -> Config {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         if let Some(v) = get("SANDAL_PROVIDER") {
             self.model.provider = v;
         }
-        if let Some(v) = get("SANDAL_MODEL") {
-            self.model.name = v;
-        }
-        if let Some(v) = get("SANDAL_BASE_URL") {
-            self.model.base_url = Some(v);
-        }
-        if let Some(v) = get("SANDAL_API_KEY_ENV") {
-            self.model.api_key_env = Some(v);
+        if let Some(v) = get("SANDAL_COMMAND") {
+            self.model.command = Some(v);
         }
         self
     }
@@ -244,8 +232,8 @@ impl Config {
             .collect()
     }
 
-    /// Build the plug-ins. `need_model = false` is for commands that never call
-    /// the model, so they work without a key. `state_dir` is `.sandal`.
+    /// Build the plug-ins. `need_model = false` is for commands that never ask
+    /// a model anything. `state_dir` is `.sandal`.
     pub fn build_plugs(&self, root: &Path, state_dir: &Path, need_model: bool) -> Result<Plugs> {
         let model = if need_model {
             build_model(&self.model, state_dir)?
@@ -260,25 +248,10 @@ impl Config {
     }
 }
 
-/// The key from the named environment variable, if it is set and not empty.
-#[cfg(any(feature = "openai", feature = "anthropic"))]
-fn key_from(env_name: &str) -> Option<String> {
-    std::env::var(env_name).ok().filter(|k| !k.trim().is_empty())
-}
-
 pub fn build_model(cfg: &ModelConfig, state_dir: &Path) -> Result<Arc<dyn Model>> {
-    let need_name = |what: &str| -> Result<()> {
-        if cfg.name.trim().is_empty() {
-            Err(Error::Plug(format!(
-                "config: [model] name is required when provider = \"{what}\""
-            )))
-        } else {
-            Ok(())
-        }
-    };
     match cfg.provider.as_str() {
+        "handoff" => Ok(Arc::new(HandoffModel::new(state_dir))),
         "fake" => Ok(Arc::new(FakeModel::new(Vec::new()))),
-        "handoff" => Ok(Arc::new(crate::plug::HandoffModel::new(state_dir))),
         "command" => {
             let program = cfg
                 .command
@@ -287,62 +260,16 @@ pub fn build_model(cfg: &ModelConfig, state_dir: &Path) -> Result<Arc<dyn Model>
                 .ok_or_else(|| {
                     Error::Plug("config: [model] command is required when provider = \"command\"".into())
                 })?;
-            Ok(Arc::new(crate::plug::CommandModel::new(
+            Ok(Arc::new(CommandModel::new(
                 &cfg.name,
                 program,
                 cfg.args.clone(),
                 cfg.timeout_secs,
             )))
         }
-        "openai" => {
-            need_name("openai")?;
-            #[cfg(feature = "openai")]
-            {
-                use crate::plug::openai::{OpenAiModel, DEFAULT_BASE_URL};
-                let base = cfg.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL);
-                let key_env = cfg.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
-                let key = key_from(key_env);
-                // Only the real OpenAI endpoint insists on a key; local and
-                // self-hosted servers usually take none.
-                if key.is_none() && base == DEFAULT_BASE_URL {
-                    return Err(Error::Plug(format!("{key_env} is not set")));
-                }
-                Ok(Arc::new(OpenAiModel::new(
-                    &cfg.name,
-                    base,
-                    key,
-                    cfg.max_tokens_param.as_deref().unwrap_or("max_tokens"),
-                )))
-            }
-            #[cfg(not(feature = "openai"))]
-            {
-                Err(Error::Plug(
-                    "this build has no OpenAI-compatible adapter: rebuild with `--features openai`".into(),
-                ))
-            }
-        }
-        "anthropic" => {
-            need_name("anthropic")?;
-            #[cfg(feature = "anthropic")]
-            {
-                use crate::plug::anthropic::{AnthropicModel, DEFAULT_BASE_URL};
-                let base = cfg.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL);
-                let key_env = cfg.api_key_env.as_deref().unwrap_or("ANTHROPIC_API_KEY");
-                let key = key_from(key_env);
-                if key.is_none() && base == DEFAULT_BASE_URL {
-                    return Err(Error::Plug(format!("{key_env} is not set")));
-                }
-                Ok(Arc::new(AnthropicModel::new(&cfg.name, base, key)))
-            }
-            #[cfg(not(feature = "anthropic"))]
-            {
-                Err(Error::Plug(
-                    "this build has no Anthropic adapter: rebuild with `--features anthropic`".into(),
-                ))
-            }
-        }
         other => Err(Error::Plug(format!(
-            "unknown model provider {other:?} (handoff, openai, anthropic, command, fake)"
+            "unknown model provider {other:?} (handoff, command, fake). SANDAL calls no model APIs: \
+             the harness driving it answers, or `command` runs a program of yours"
         ))),
     }
 }

@@ -14,10 +14,29 @@ fn sandal(dir: &std::path::Path, args: &[&str]) -> Run {
     let out = Command::new(env!("CARGO_BIN_EXE_sandal"))
         .current_dir(dir)
         .env_remove("SANDAL_PROVIDER")
-        .env_remove("SANDAL_MODEL")
+        .env_remove("SANDAL_COMMAND")
         .args(args)
         .output()
         .unwrap();
+    Run {
+        code: out.status.code().unwrap(),
+        out: String::from_utf8_lossy(&out.stdout).into_owned(),
+        err: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+fn sandal_stdin(dir: &std::path::Path, args: &[&str], input: &str) -> Run {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sandal"))
+        .current_dir(dir)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
     Run {
         code: out.status.code().unwrap(),
         out: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -122,12 +141,16 @@ fn handoff_round_trip_through_the_cli() {
     assert_eq!(r.code, 3);
     assert!(r.err.contains("waiting on 1 model reply"), "{}", r.err);
 
-    // 2. The agent writes the reply and runs the same command again.
-    std::fs::write(
-        pending[0]["response_file"].as_str().unwrap(),
+    // 2. The harness replies with `sandal answer` (reply on stdin) and runs the same command again.
+    assert!(pending[0]["prompt"].as_str().unwrap().contains("TASK: back"), "the prompt text is in the listing");
+    let key = pending[0]["key"].as_str().unwrap();
+    let r = sandal_stdin(
+        dir.path(),
+        &["--json", "answer", &key[..8]],
         r#"{"principles":["tiny hooks catch loops"],"conditions":["a loop surface exists"]}"#,
-    )
-    .unwrap();
+    );
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert_eq!(json(&r)["remaining"], 0);
     let r = sandal(dir.path(), &["--json", "back", &id[..8]]);
     assert_eq!(r.code, 0, "{}{}", r.out, r.err);
     let j = json(&r);
@@ -142,17 +165,17 @@ fn handoff_round_trip_through_the_cli() {
 }
 
 #[test]
-fn a_provider_without_a_model_name_says_what_is_missing() {
+fn a_command_provider_without_a_command_says_what_is_missing() {
     let dir = tempfile::tempdir().unwrap();
     sandal(dir.path(), &["init"]);
     let id = sandal(dir.path(), &["add", "idea", "--title", "t", "--body", "b"]).out.trim().to_string();
     let cfg = dir.path().join(".sandal/config.toml");
-    let text = std::fs::read_to_string(&cfg).unwrap().replace("provider = \"handoff\"", "provider = \"openai\"");
+    let text = std::fs::read_to_string(&cfg).unwrap().replace("provider = \"handoff\"", "provider = \"command\"");
     std::fs::write(&cfg, text).unwrap();
     let r = sandal(dir.path(), &["back", &id[..8]]);
     assert_eq!(r.code, 1);
-    assert!(r.err.contains("name is required"), "{}", r.err);
-    // The environment can fix it without editing the file: here, back to handoff.
+    assert!(r.err.contains("command is required"), "{}", r.err);
+    // The environment can switch it back without editing the file.
     let out = Command::new(env!("CARGO_BIN_EXE_sandal"))
         .current_dir(dir.path())
         .env("SANDAL_PROVIDER", "handoff")

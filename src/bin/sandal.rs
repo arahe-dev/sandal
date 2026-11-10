@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 /// Exit codes, stable for scripts and agents.
 const EXIT_ERROR: u8 = 1;
-/// Waiting on model replies (the handoff provider): answer them and run again.
+/// Waiting on model replies: answer them with `sandal answer` and run again.
 const EXIT_PENDING: u8 = 3;
 
 #[derive(Parser)]
@@ -21,7 +21,7 @@ const EXIT_PENDING: u8 = 3;
     name = "sandal",
     version,
     about = "Carry ideas that worked in one place into a new problem, propose trials, and re-read conclusions as evidence arrives",
-    after_help = "Exit codes: 0 done, 1 error, 3 waiting on model replies (provider = \"handoff\"; see AGENTS.md)."
+    after_help = "Exit codes: 0 done, 1 error, 3 waiting on model replies (see AGENTS.md)."
 )]
 struct Cli {
     /// The state directory.
@@ -93,6 +93,13 @@ enum Command {
     Stats,
     /// List model prompts that are waiting for a reply (provider = "handoff")
     Pending,
+    /// Reply to a waiting prompt: the reply is read from --file, or from stdin
+    Answer {
+        /// The prompt's key, or any unique prefix of it
+        key: String,
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
     /// Run the bench: the pipeline against the same model asked once
     Bench {
         cases: PathBuf,
@@ -159,7 +166,7 @@ fn fail(cli: &Cli, e: Error) -> ExitCode {
             let doc = json!({
                 "ok": false,
                 "status": "pending",
-                "message": "model replies are needed: write each reply to its response_file, then run the same command again",
+                "message": "model replies are needed: answer each prompt (sandal answer <key>, or write its response_file), then run the same command again",
                 "pending": list,
             });
             println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
@@ -474,6 +481,23 @@ async fn run(cli: &Cli) -> Result<Out> {
                 line!(t, "prompt:   {}\nresponse: {}", p.prompt_file.display(), p.response_file.display());
             }
             Ok(Out { json: json!({ "ok": true, "pending": list }), text: t })
+        }
+        Command::Answer { key, file } => {
+            let reply = match file {
+                Some(f) => std::fs::read_to_string(f)?,
+                None => {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
+                    s
+                }
+            };
+            let answered = handoff::answer(&cli.dir, key, &reply)?;
+            let remaining = handoff::pending(&cli.dir).len();
+            Ok(Out {
+                json: json!({ "ok": true, "key": answered.key, "response_file": answered.response_file, "remaining": remaining }),
+                text: format!("answered {} ({remaining} still waiting)
+", answered.key),
+            })
         }
         Command::Bench { cases, n } => {
             let env = bench_env(cli)?;

@@ -1,66 +1,62 @@
-# Driving SANDAL from an agent
+# Using SANDAL from a harness
 
-SANDAL does not care which model, vendor or agent sits behind it. You can drive it from any agent that can run shell commands and read and write files, and the agent can itself be the model.
+SANDAL is a tool for a harness (Claude Code, Codex, Cursor, a script, you), not a harness itself. It holds no API keys and calls no model API. The harness that drives it is the model.
 
-## 1. Pick a model (or be one)
+What SANDAL does is the part a model is bad at holding in its head: every derived thing is stored with what it was derived from, results are cached, and when new evidence arrives only the readings that depended on it are marked stale. The harness does the thinking steps; SANDAL does the bookkeeping.
 
-Set `[model] provider` in `.sandal/config.toml`, or override it per run with environment variables (`SANDAL_PROVIDER`, `SANDAL_MODEL`, `SANDAL_BASE_URL`, `SANDAL_API_KEY_ENV`).
+## The loop
 
-| provider | what it is | needs |
-| --- | --- | --- |
-| `handoff` (default) | **You** answer. Prompts are written to files; you write the replies. | nothing |
-| `openai` | any OpenAI-compatible endpoint: OpenAI, Ollama, LM Studio, vLLM, OpenRouter, Groq, llama.cpp | `name`; `base_url` for anything but OpenAI; a key only if the server wants one |
-| `anthropic` | Anthropic Messages API | `name`, `ANTHROPIC_API_KEY` |
-| `command` | any program: prompt on stdin, reply on stdout (a local CLI agent, a script) | `command`, optional `args` |
-
-`api_key_env` names the variable that holds the key, so the key never goes in the file. Local servers need none:
-
-```toml
-[model]
-provider = "openai"
-name = "llama3.1"
-base_url = "http://localhost:11434/v1"
-```
-
-## 2. Machine-readable output
-
-Add `--json` to any command. stdout is then exactly one JSON document, with `"ok": true` on success and, on failure, `"ok": false` plus `"status"` and `"error"`. Text goes to stderr only for the stats line.
-
-Exit codes: `0` done, `1` error, `3` waiting on model replies.
-
-Ids are 64 hex characters; any unique prefix of 8 or more also works.
-
-## 3. The handoff loop (you are the model)
+Some steps need a model: `map`, `back`, `match`, `carry`, `roots`, `read`. When SANDAL reaches one it does not call anything. It writes the prompt down, stops, and exits with code **3**:
 
 ```text
-sandal --json map kitchen --problem-file problem.txt
-  -> exit 3, {"status": "pending", "pending": [{"key", "prompt_file", "response_file"}, ...]}
+sandal --json cycle kitchen
+  -> exit 3
+     {"ok": false, "status": "pending",
+      "pending": [{"key": "9f2c…", "prompt": "TASK: back\n…", "prompt_file": "…", "response_file": "…"}, …]}
 ```
 
-1. Read each `prompt_file`. It says what is wanted and the exact JSON shape.
-2. Write **only the reply** (a JSON object, no prose) to the matching `response_file`.
-3. Run the same command again. Everything already answered is read back from disk and finished steps are memoised, so a rerun only does new work. It may ask for more (a pipeline has several waves); repeat until exit 0.
+1. For each pending item, read `prompt`. It says what is wanted and gives the exact JSON shape.
+2. Answer with **only the reply** (a JSON object, no prose, no fences):
+   `sandal answer <key> --file reply.json`, or pipe it on stdin: `sandal answer <key> < reply.json`.
+   The key may be any unique prefix.
+3. Run the same command again. Everything already answered is read back, and finished steps are memoised, so a rerun only does new work. A pipeline has several waves (`back`, then `match`, then `carry`, …); repeat until the exit code is 0.
 
-`sandal --json pending` lists what is waiting at any time. If a reply is not valid JSON for the step, SANDAL asks once more with the parse error attached, as a new pending prompt.
+All prompts of one wave (say one `back` per source) are written in a single run, so answer them together. `sandal pending` lists what is waiting at any time.
 
-All prompts of one wave (for example one `back` per source) are written in a single run, so you can answer them together.
+If a reply is not valid for its step, SANDAL asks once more, with the parse error attached, as a new pending prompt. It never guesses.
 
-## 4. A typical session
+## Output and exit codes
+
+Add `--json` to any command: stdout is then exactly one JSON document, `"ok": true` on success, and on failure `"ok": false` with `"status"` (`"error"` or `"pending"`).
+
+| exit | meaning |
+| --- | --- |
+| 0 | done |
+| 1 | error (the message says what is missing) |
+| 3 | waiting on model replies |
+
+Ids are 64 hex characters. Any unique prefix of 8 or more works.
+
+## A session
 
 ```bash
 sandal init
 sandal --json add source --title "..." --body "..." --domain "..." --outcome "..."
-sandal --json map myproblem --problem-file problem.txt      # model: break the problem into parts
-sandal --json cycle myproblem --k 8 --max-trials 5          # model: notice, back, match, carry, roots, mix
-sandal --json try <proposal-id>                             # verifier: runs the proposal's trial
-sandal --json read <source-id> --map myproblem              # model: what is this useful for, now
+sandal --json map myproblem --problem-file problem.txt      # model step: break the problem into parts
+sandal --json cycle myproblem --k 8 --max-trials 5          # model steps: back, match, carry, roots; then mix
+sandal --json try <proposal-id>                             # runs the proposal's trial through the verifier
+sandal --json read <source-id> --map myproblem              # model step: what is this useful for, now
 sandal --json stale                                         # readings whose evidence has moved
 sandal --json establish <result-id>                         # only a verifier's Confirmed result works
 ```
 
-Things worth knowing:
+## Rules the tool enforces
 
 - Everything a model writes is a claim. Only a verifier's `confirmed` trial result can make a proposal established; you cannot write one by hand.
-- A model never supplies a command. Trials are templates in config; a proposal picks one by name and fills in named parameters, which are validated.
+- A model never supplies a command. Trials are templates in `.sandal/config.toml`; a proposal picks one by name and fills in named parameters, which are validated.
 - `uncertain` (timed out, crashed) is not evidence against an idea.
 - State is plain files in `.sandal/`: `ledger.jsonl` and `memo.jsonl` are append-only, so you can read, diff and replay them.
+
+## When a hand-off per step is too slow
+
+Set `provider = "command"` in `[model]` (or `SANDAL_PROVIDER=command` and `SANDAL_COMMAND=<program>`). SANDAL then runs that program for each model step: the prompt goes to its stdin and the reply is its stdout. Point it at any harness CLI that has a one-shot mode, or at a script. SANDAL still never sees a key; whatever the program needs, the program holds.

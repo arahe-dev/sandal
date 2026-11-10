@@ -33,6 +33,8 @@ pub struct HandoffModel {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PendingPrompt {
     pub key: String,
+    /// The prompt itself, so a caller need not open the file.
+    pub prompt: String,
     pub prompt_file: PathBuf,
     pub response_file: PathBuf,
 }
@@ -78,6 +80,7 @@ pub fn pending(state_dir: &Path) -> Vec<PendingPrompt> {
             let response_file = dir.join(format!("{key}.response.txt"));
             (!response_file.exists()).then(|| PendingPrompt {
                 key,
+                prompt: std::fs::read_to_string(e.path()).unwrap_or_default(),
                 prompt_file: e.path(),
                 response_file,
             })
@@ -85,6 +88,27 @@ pub fn pending(state_dir: &Path) -> Vec<PendingPrompt> {
         .collect();
     out.sort_by(|a, b| a.key.cmp(&b.key));
     out
+}
+
+/// Record the reply to a pending prompt. `key` may be any unique prefix of the
+/// key. Returns the prompt it answered.
+pub fn answer(state_dir: &Path, key: &str, reply: &str) -> Result<PendingPrompt> {
+    if reply.trim().is_empty() {
+        return Err(Error::Plug("the reply is empty".into()));
+    }
+    let list = pending(state_dir);
+    let mut hits = list.iter().filter(|p| p.key.starts_with(key));
+    let found = match (hits.next(), hits.next()) {
+        (Some(p), None) => p.clone(),
+        (None, _) => {
+            return Err(Error::NotFound(format!(
+                "no pending prompt starts with {key:?} (see `sandal pending`)"
+            )))
+        }
+        (Some(_), Some(_)) => return Err(Error::NotFound(format!("prefix {key:?} is ambiguous"))),
+    };
+    std::fs::write(&found.response_file, reply.trim_end())?;
+    Ok(found)
 }
 
 #[async_trait]

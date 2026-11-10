@@ -14,11 +14,6 @@ pub mod fake;
 pub mod file_source;
 pub mod handoff;
 
-#[cfg(feature = "anthropic")]
-pub mod anthropic;
-#[cfg(feature = "openai")]
-pub mod openai;
-
 pub use command_model::CommandModel;
 pub use command_verifier::{CommandVerifier, ParamTemplate, Template};
 pub use fake::{FakeModel, FakeSource, FakeVerifier};
