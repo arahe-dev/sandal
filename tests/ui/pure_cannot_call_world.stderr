@@ -1,0 +1,55 @@
+error[E0271]: type mismatch resolving `<Try as Op>::Fx == PureFx`
+  --> tests/ui/pure_cannot_call_world.rs:16:9
+   |
+16 |         ctx.run(&Try, i).await
+   |         ^^^^^^^^^^^^^^^^ expected `PureFx`, found `WorldFx`
+
+error[E0271]: type mismatch resolving `<Try as Op>::Fx == PureFx`
+  --> tests/ui/pure_cannot_call_world.rs:16:13
+   |
+16 |         ctx.run(&Try, i).await
+   |             ^^^ expected `PureFx`, found `WorldFx`
+
+error[E0277]: the trait bound `sandal::PureFx: Allows<WorldFx>` is not satisfied
+  --> tests/ui/pure_cannot_call_world.rs:16:9
+   |
+16 |         ctx.run(&Try, i).await
+   |         ^^^^^^^^^^^^^^^^ the trait `Allows<WorldFx>` is not implemented for `sandal::PureFx`
+   |
+help: the trait `Allows<WorldFx>` is not implemented for `sandal::PureFx`
+      but trait `Allows<sandal::PureFx>` is implemented for it
+  --> src/fx.rs
+   |
+   | impl Allows<PureFx> for PureFx {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `sandal::PureFx`, found `WorldFx`
+note: required by a bound in `sandal::Ctx::<E>::run`
+  --> src/ctx.rs
+   |
+   |     pub async fn run<O: Op>(&self, op: &O, input: O::In) -> Result<O::Out>
+   |                  --- required by a bound in this associated function
+   |     where
+   |         E: Allows<O::Fx>,
+   |            ^^^^^^^^^^^^^ required by this bound in `Ctx::<E>::run`
+
+error[E0277]: the trait bound `sandal::PureFx: Allows<WorldFx>` is not satisfied
+  --> tests/ui/pure_cannot_call_world.rs:16:26
+   |
+16 |         ctx.run(&Try, i).await
+   |                          ^^^^^ the trait `Allows<WorldFx>` is not implemented for `sandal::PureFx`
+   |
+help: the trait `Allows<WorldFx>` is not implemented for `sandal::PureFx`
+      but trait `Allows<sandal::PureFx>` is implemented for it
+  --> src/fx.rs
+   |
+   | impl Allows<PureFx> for PureFx {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `sandal::PureFx`, found `WorldFx`
+note: required by a bound in `sandal::Ctx::<E>::run`
+  --> src/ctx.rs
+   |
+   |     pub async fn run<O: Op>(&self, op: &O, input: O::In) -> Result<O::Out>
+   |                  --- required by a bound in this associated function
+   |     where
+   |         E: Allows<O::Fx>,
+   |            ^^^^^^^^^^^^^ required by this bound in `Ctx::<E>::run`

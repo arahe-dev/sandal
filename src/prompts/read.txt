@@ -1,0 +1,19 @@
+TASK: read
+Say what the thing below is useful for, given the parts of the problem and the evidence so far.
+
+## The thing
+{thing}
+
+## The parts of the problem
+{parts}
+
+## Trial results
+{results}
+
+## Trials that did not complete (not evidence either way)
+{uncertain}
+
+Do not call the thing good or bad. Say what it is useful for, in which part, and how far.
+
+Return a JSON object of exactly this shape:
+{"text": "<a short reading>", "useful_for": ["<a use, naming the part>"], "caveats": ["<a limit of the evidence>"]}

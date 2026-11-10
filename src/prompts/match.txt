@@ -1,0 +1,21 @@
+TASK: match
+Compare what made an earlier idea work with the parts of a new problem. Judge the conditions only.
+
+Principles of the earlier idea:
+{principles}
+
+Conditions the earlier idea needed:
+{conditions}
+
+Parts of the new problem:
+{parts}
+
+For each part of the new problem where the earlier idea's conditions overlap, say which conditions hold on both sides (shared) and which conditions the earlier idea needed that the new part lacks (missing).
+
+Return a JSON object of exactly this shape:
+{"matches": [{"part": "<exact part name>", "shared": ["<condition>"], "missing": ["<condition>"], "note": "<one sentence>"}]}
+
+Rules:
+- Use part names exactly as given.
+- Leave a part out if nothing is shared.
+- An empty list is a valid answer.

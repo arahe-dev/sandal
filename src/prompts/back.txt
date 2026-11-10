@@ -1,0 +1,15 @@
+TASK: back
+Below is something that worked, or was tried, somewhere. Say what made it work, and under what conditions it works.
+
+Title: {title}
+Domain: {domain}
+Body:
+{body}
+
+Return a JSON object of exactly this shape:
+{"principles": ["<what made it work>"], "conditions": ["<a condition that has to hold for it to work>"]}
+
+Rules:
+- 1 to 6 principles and 1 to 6 conditions.
+- Each is one short sentence.
+- Describe the mechanism, not the field it came from.

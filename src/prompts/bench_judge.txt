@@ -1,0 +1,15 @@
+TASK: bench_judge
+You are checking proposed ideas against a list of key points. For each key point, say whether any of the proposed ideas below carries it.
+
+Key points:
+{key_points}
+
+Proposed ideas:
+{texts}
+
+Return a JSON object of exactly this shape:
+{"covered": [true, false]}
+
+Rules:
+- Exactly one true or false per key point, in the same order.
+- Say true only if a proposed idea clearly contains the key point.

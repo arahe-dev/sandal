@@ -1,0 +1,11 @@
+TASK: roots
+Each numbered line below is the assumption a proposal rests on. Give proposals that rest on the same assumption the same label. Use a short, plain label.
+
+{proposals}
+
+Return a JSON object of exactly this shape:
+{"labels": ["<label for line 1>", "<label for line 2>"]}
+
+Rules:
+- Exactly one label per line, in the same order.
+- Identical assumptions get identical labels.

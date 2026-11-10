@@ -1,0 +1,15 @@
+TASK: bench_plain
+Here is a problem and a numbered list of things that were tried elsewhere. Pick up to {n} of them that could be carried over to the problem, and rebuild each one for it.
+
+Problem:
+{problem}
+
+Things tried elsewhere:
+{sources}
+
+Return a JSON object of exactly this shape:
+{"proposals": [{"source_index": 0, "rebuilt": "<the idea rebuilt for the problem>"}]}
+
+Rules:
+- source_index is the number of the item in the list above.
+- At most {n} proposals.

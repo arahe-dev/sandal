@@ -1,0 +1,13 @@
+error[E0599]: the method `ask` exists for reference `&'life1 sandal::Ctx<sandal::PureFx>`, but its trait bounds were not satisfied
+  --> tests/ui/pure_cannot_ask.rs:16:13
+   |
+16 |         ctx.ask("system", "prompt").await
+   |             ^^^ method cannot be called on `&'life1 sandal::Ctx<sandal::PureFx>` due to unsatisfied trait bounds
+   |
+  ::: src/fx.rs
+   |
+   | pub struct PureFx;
+   | ----------------- doesn't satisfy `sandal::PureFx: Allows<ModelFx>`
+   |
+   = note: the following trait bounds were not satisfied:
+           `sandal::PureFx: Allows<ModelFx>`

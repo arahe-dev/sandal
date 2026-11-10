@@ -1,0 +1,15 @@
+TASK: map
+Break the problem below into parts.
+
+Problem name: {name}
+Problem:
+{problem}
+
+Return a JSON object of exactly this shape:
+{"summary": "<one or two sentences>", "parts": [{"name": "<short unique name>", "description": "<what this part is>", "conditions": ["<one short factual sentence about the target situation>"]}]}
+
+Rules:
+- 2 to 8 parts.
+- Part names are unique.
+- Every part has at least one condition.
+- A condition is one short factual sentence about the target situation.

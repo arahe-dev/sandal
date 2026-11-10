@@ -1,0 +1,30 @@
+TASK: carry
+Rebuild an idea that worked elsewhere for one part of a new problem, and name a trial that would test it.
+
+The earlier idea:
+{source}
+
+What made it work:
+{principles}
+
+The part of the new problem:
+Name: {part}
+Description: {part_description}
+Conditions:
+{part_conditions}
+
+Conditions shared with the earlier idea:
+{shared}
+
+Conditions the earlier idea needed that this part lacks:
+{missing}
+
+Trial kinds you may choose from (use exactly one name, and give a value for each parameter):
+{trial_kinds}
+
+Return a JSON object of exactly this shape:
+{"rebuilt": "<the idea rebuilt for this part>", "root": "<the assumption this rests on, one short phrase>", "trial": {"kind": "<trial kind name>", "params": {"<parameter name>": "<value>"}, "description": "<what the trial does>"}, "if_right": "<what we would see if the idea is right>", "if_wrong": "<what we would see if it is wrong>"}
+
+Rules:
+- Every field is required and non-empty.
+- This is a claim, not a result.
