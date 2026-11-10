@@ -207,6 +207,13 @@ pub struct Group {
     pub members: Vec<Id<Proposal>>,
 }
 
+/// Output of `pair`: proposals from different roots, to be tried together.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pairing {
+    pub pairs: Vec<(Id<Proposal>, Id<Proposal>)>,
+}
+payload!(Pairing, "pairing");
+
 /// Output of `read`. Free text, no verdict field.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Reading {

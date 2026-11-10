@@ -26,7 +26,7 @@ pub use memo::MemoEntry;
 pub use op::{each, iterate, keep_ok, then, Op};
 pub use ops::{
     Back, BackIn, Carry, CarryIn, Cycle, CycleIn, CycleOut, Forward, ForwardIn, MapIn, MapOp, MatchIn, MatchOp, Mix,
-    MixIn, Notice, NoticeIn, Read, ReadIn, Roots, RootsIn, Try, TryIn,
+    MixIn, Notice, NoticeIn, Pair, PairIn, Read, ReadIn, Roots, RootsIn, Try, TryIn,
 };
 pub use plug::{Model, Source, SourceQuery, TrialKind, TrialOutcome, Verifier};
 pub use thing::*;

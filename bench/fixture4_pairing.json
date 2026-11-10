@@ -1,0 +1,15 @@
+{
+  "id": "fixture-4",
+  "description": "Known weakness x new delivery channel. A weakness that is already known, and a channel the fix could travel through that nobody has tried for it. Neither proposal is good on its own; paired, the channel carries the weakness fix.",
+  "problem": "Messages must reach users reliably even when a service is degraded.",
+  "roots": {
+    "known weakness": [
+      "Retries amplify load during an outage",
+      "Cached reads go stale after a write"
+    ],
+    "new delivery channel": [
+      "Queued delivery that drains when a service recovers"
+    ]
+  },
+  "expected_pair": ["known weakness", "new delivery channel"]
+}
