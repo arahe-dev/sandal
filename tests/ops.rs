@@ -382,3 +382,32 @@ async fn notice_deduplicates_and_returns_the_first_k() {
     assert!(matches!(t.made_by, MadeBy::Source(_)));
     assert_eq!(ids[0].raw(), thing_id(A));
 }
+
+/// Pins the `fetch` budget decision: one world call per source whatever `k`
+/// is, and `k` only truncates afterwards. A change to this is a deliberate one.
+#[tokio::test]
+async fn fetch_spends_one_call_per_source_whatever_k_is() {
+    use sandal::plug::FakeSource;
+    use std::sync::Arc;
+    let all = world::items();
+    let a = Arc::new(FakeSource::new("a", all[..2].to_vec()));
+    let b = Arc::new(FakeSource::new("b", all[2..].to_vec()));
+    let dir = tempfile::tempdir().unwrap();
+    let plugs = Plugs {
+        model: Arc::new(FakeModel::new(world::script())),
+        sources: vec![a.clone(), b.clone()],
+        verifier: Arc::new(FakeVerifier::new(vec![])),
+    };
+    let engine = Engine::open(dir.path(), plugs, Budget::default()).unwrap();
+    let map = engine
+        .run(&MapOp, MapIn { name: "fridge".into(), problem: world::PROBLEM.into() })
+        .await
+        .unwrap();
+    let got = engine
+        .run(&Notice, NoticeIn { map, k: 1, exclude_domains: vec![] })
+        .await
+        .unwrap();
+    assert_eq!(got.len(), 1, "k truncates the result");
+    assert_eq!(a.calls(), 1);
+    assert_eq!(b.calls(), 1, "every source is called, even though k is 1");
+}

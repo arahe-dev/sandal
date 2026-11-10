@@ -90,7 +90,9 @@ Places where the design was silent or needed a small hook are marked `// DECISIO
 - Concurrency is bounded around model, source and verifier calls rather than around whole operations, so nested `run_all` calls cannot deadlock (`src/ctx.rs`).
 - `Cycle` skips failed items but never `BudgetExhausted` or `Pending` (`keep_ok` in `src/op.rs`).
 - A torn last line in `ledger.jsonl` or `memo.jsonl` is cut off the file when it is opened, so the next append cannot turn it into a bad middle line (`src/ledger.rs`).
+- `Pair` (cross-root pairing) is an addition the design does not name. It pairs group heads from different roots and leaves `Mix` unchanged. Acceptance: `bench/fixture4_pairing.json`, run by `tests/pairing.rs`.
 - `Mix` reads "the remaining members in the same group order" as: the head of every group first, then the rest of each group in turn (`src/ops/mix.rs`).
+- `fetch` spends one world call per source and only then truncates to `k`. Capping calls at `k` would silently skip sources, since a source's contribution is known only after calling it. The cost is bounded by the number of configured sources, and `max_world_calls` is the limit. Pinned by `fetch_spends_one_call_per_source_whatever_k_is` (`src/ctx.rs`, `tests/ops.rs`).
 - `sandal stats` counters are per process; it also summarises the ledger. With no verifier templates, `sandal bench` uses a placeholder trial kind, since it runs no trials (`src/bin/sandal.rs`).
 
 Still out of scope for v0, with reasons in the design: collision finder across maps, prompt tuning, a ledger-reading source, in-flight deduplication, a written syntax, multiple verifiers, multi-process access, macros, a user interface.

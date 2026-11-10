@@ -225,6 +225,12 @@ pub(crate) fn retry_prompt(prompt: &str, error: &str) -> String {
 impl Ctx<WorldFx> {
     /// Ask every source in order, append each item, drop duplicates by id and
     /// return the first `k`.
+    ///
+    /// DECISION: one world call is spent per source, and `k` only truncates the
+    /// result afterwards. Whether a source contributes is known only after
+    /// calling it, so capping calls at `k` would silently skip sources. The
+    /// cost is bounded by the number of configured sources, and
+    /// `Budget::max_world_calls` is the limit that applies. Not a bug.
     pub async fn fetch(&self, q: &SourceQuery) -> Result<Vec<Id<SourceItem>>> {
         let mut seen = BTreeSet::new();
         let mut out = Vec::new();
