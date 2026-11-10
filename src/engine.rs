@@ -133,9 +133,14 @@ pub(crate) async fn run_op<O: Op>(
                 }
             } else if effect == Effect::World {
                 // A World result is permanent: returned as stored, rerun only
-                // with force. Its stale dependencies are not passed upward.
+                // with force. The caller still depends on what it was derived
+                // from, so its stored deps (with their old versions) are passed
+                // up. The caller then goes stale when those slots move.
                 if let Ok(out) = serde_json::from_value::<O::Out>(entry.output.clone()) {
                     core.hits.fetch_add(1, Ordering::SeqCst);
+                    if let Some(p) = parent {
+                        p.merge(&entry.deps);
+                    }
                     return Ok(out);
                 }
             }
